@@ -1,4 +1,5 @@
-use crate::{EnhancedRAGArticleGenerator, Result};
+use crate::{EnhancedRAGArticleGenerator};
+use anyhow::Result;
 use clap::{Arg, Command};
 use tracing::{info, error};
 

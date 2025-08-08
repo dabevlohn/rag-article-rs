@@ -3,14 +3,22 @@ name = "enhanced_rag_article_generator"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "enhanced-rag-generator"
+path = "src/main.rs"
+
+[lib]
+name = "enhanced_rag_article_generator"
+path = "src/lib.rs"
+
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
-reqwest = { version = "0.11", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-scraper = "0.18"
-html2text = "0.6"
-url = "2.4"
+scraper = "0.20"
+html2text = "0.12"
+url = "2.5"
 uuid = { version = "1.0", features = ["v4"] }
 thiserror = "1.0"
 anyhow = "1.0"
@@ -18,23 +26,19 @@ regex = "1.10"
 futures = "0.3"
 clap = { version = "4.0", features = ["derive"] }
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
+urlencoding = "2.1"
 
-# Для векторных embeddings (используем candle для локальных моделей)
-candle-core = "0.3"
-candle-nn = "0.3"
-candle-transformers = "0.3"
-tokenizers = "0.15"
+# Простые зависимости для базовой обработки текста
+ndarray = "0.15"
+nalgebra = "0.32"
 
-# Для работы с HTTP и JSON
-hyper = "0.14"
-hyper-tls = "0.5"
+[dev-dependencies]
+tokio-test = "0.4"
 
-# Для конфигурации
-config = "0.13"
-toml = "0.8"
-
-# Для обработки текста
-unicode-segmentation = "1.10"
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

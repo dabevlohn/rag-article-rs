@@ -1,8 +1,5 @@
-pub mod cli;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
-use chrono::Utc;
 use regex::Regex;
 use reqwest::Client;
 use scraper::{Html, Selector};
@@ -10,11 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 use url::Url;
+use ndarray::{Array1, Array2};
 
-// Реэкспорт основных типов для удобства
-pub use crate::cli::{cli, run_cli};
+pub mod cli;
 
 /// Структура для метаданных источника
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,13 +82,11 @@ impl SearchWrapper for SearxSearchWrapper {
         let response = self.client
             .get(&search_url)
             .send()
-            .await
-            .context("Ошибка при выполнении поискового запроса")?;
+            .await?;
 
         let search_result: SearchResult = response
             .json()
-            .await
-            .context("Ошибка при парсинге JSON ответа от SearXNG")?;
+            .await?;
 
         let mut results = search_result.results;
         results.truncate(num_results as usize);
@@ -110,23 +105,17 @@ pub trait DocumentLoader {
 /// Реализация загрузчика документов с поддержкой рекурсивной загрузки
 pub struct RecursiveUrlLoader {
     client: Client,
-    max_depth: u32,
-    timeout: Duration,
 }
 
 impl RecursiveUrlLoader {
-    pub fn new(max_depth: u32, timeout_secs: u64) -> Self {
+    pub fn new(_max_depth: u32, timeout_secs: u64) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .user_agent("Mozilla/5.0 (compatible; Enhanced-RAG-Bot/1.0)")
             .build()
             .expect("Failed to create HTTP client");
 
-        Self {
-            client,
-            max_depth,
-            timeout: Duration::from_secs(timeout_secs),
-        }
+        Self { client }
     }
 
     /// Конвертация HTML в Markdown
@@ -154,26 +143,6 @@ impl RecursiveUrlLoader {
         
         filtered_lines.join("\n")
     }
-
-    /// Извлечение краткого содержания и тем
-    fn extract_content_summary(&self, markdown_content: &str) -> (String, Vec<String>) {
-        // Извлекаем заголовки для определения тем
-        let re_headers = Regex::new(r"(?m)^#+\s+(.+)$").unwrap();
-        let headers: Vec<String> = re_headers
-            .captures_iter(markdown_content)
-            .map(|cap| cap[1].trim().to_string())
-            .take(5)
-            .collect();
-
-        // Краткое содержание - первые 300 символов
-        let summary = if markdown_content.len() > 300 {
-            format!("{}...", &markdown_content[..300].replace('\n', " ").trim())
-        } else {
-            markdown_content.replace('\n', " ").trim().to_string()
-        };
-
-        (summary, headers)
-    }
 }
 
 #[async_trait]
@@ -184,8 +153,7 @@ impl DocumentLoader for RecursiveUrlLoader {
         let response = self.client
             .get(url)
             .send()
-            .await
-            .context("Ошибка при загрузке страницы")?;
+            .await?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!("HTTP ошибка: {}", response.status()));
@@ -193,8 +161,7 @@ impl DocumentLoader for RecursiveUrlLoader {
 
         let html_content = response
             .text()
-            .await
-            .context("Ошибка при чтении содержимого страницы")?;
+            .await?;
 
         // Конвертируем HTML в Markdown
         let markdown_content = self.convert_html_to_markdown(&html_content);
@@ -241,7 +208,7 @@ pub trait EmbeddingModel {
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>>;
 }
 
-/// Реализация эмбеддингов через Ollama API
+/// Простая реализация эмбеддингов через Ollama API
 pub struct OllamaEmbeddings {
     client: Client,
     model_name: String,
@@ -291,8 +258,7 @@ impl EmbeddingModel for OllamaEmbeddings {
             .post(&url)
             .json(&request_body)
             .send()
-            .await
-            .context("Ошибка при запросе embeddings от Ollama")?;
+            .await?;
 
         #[derive(Deserialize)]
         struct EmbeddingResponse {
@@ -301,26 +267,27 @@ impl EmbeddingModel for OllamaEmbeddings {
 
         let embedding_response: EmbeddingResponse = response
             .json()
-            .await
-            .context("Ошибка при парсинге ответа embeddings от Ollama")?;
+            .await?;
 
         Ok(embedding_response.embedding)
     }
 }
 
-/// Простое векторное хранилище в памяти
-pub struct InMemoryVectorStore {
+/// Простое векторное хранилище в памяти с базовой математикой
+pub struct SimpleVectorStore {
     documents: Vec<Document>,
-    embeddings: Vec<Vec<f32>>,
+    embeddings: Array2<f32>,
     embedding_model: Box<dyn EmbeddingModel + Send + Sync>,
+    embedding_dim: usize,
 }
 
-impl InMemoryVectorStore {
+impl SimpleVectorStore {
     pub fn new(embedding_model: Box<dyn EmbeddingModel + Send + Sync>) -> Self {
         Self {
             documents: Vec::new(),
-            embeddings: Vec::new(),
+            embeddings: Array2::zeros((0, 0)),
             embedding_model,
+            embedding_dim: 0,
         }
     }
 
@@ -334,8 +301,44 @@ impl InMemoryVectorStore {
 
         let new_embeddings = self.embedding_model.embed_documents(&texts).await?;
         
+        if new_embeddings.is_empty() {
+            return Ok(());
+        }
+        
+        // Определяем размерность embeddings
+        if self.embedding_dim == 0 {
+            self.embedding_dim = new_embeddings[0].len();
+            self.embeddings = Array2::zeros((0, self.embedding_dim));
+        }
+        
+        // Конвертируем Vec<Vec<f32>> в Array2<f32>
+        let new_embeddings_array = Array2::from_shape_vec(
+            (new_embeddings.len(), self.embedding_dim),
+            new_embeddings.into_iter().flatten().collect(),
+        )?;
+        
+        // Объединяем старые и новые embeddings
+        if self.embeddings.nrows() == 0 {
+            self.embeddings = new_embeddings_array;
+        } else {
+            let old_embeddings = self.embeddings.clone();
+            self.embeddings = Array2::zeros((
+                old_embeddings.nrows() + new_embeddings_array.nrows(), 
+                self.embedding_dim
+            ));
+            
+            // Копируем старые embeddings
+            self.embeddings
+                .slice_mut(ndarray::s![..old_embeddings.nrows(), ..])
+                .assign(&old_embeddings);
+            
+            // Копируем новые embeddings
+            self.embeddings
+                .slice_mut(ndarray::s![old_embeddings.nrows().., ..])
+                .assign(&new_embeddings_array);
+        }
+        
         self.documents.extend(documents);
-        self.embeddings.extend(new_embeddings);
         
         info!("Документы успешно добавлены в векторное хранилище");
         Ok(())
@@ -347,17 +350,16 @@ impl InMemoryVectorStore {
         }
 
         let query_embedding = self.embedding_model.embed_query(query).await?;
+        let query_array = Array1::from(query_embedding);
         
-        // Вычисляем косинусное сходство
-        let mut similarities: Vec<(usize, f32)> = self.embeddings
-            .iter()
-            .enumerate()
-            .map(|(idx, doc_embedding)| {
-                let similarity = cosine_similarity(&query_embedding, doc_embedding);
-                (idx, similarity)
-            })
-            .collect();
-
+        // Вычисляем косинусное сходство для каждого документа
+        let mut similarities = Vec::new();
+        
+        for (idx, doc_embedding) in self.embeddings.outer_iter().enumerate() {
+            let similarity = cosine_similarity_arrays(&query_array, &doc_embedding.to_owned());
+            similarities.push((idx, similarity));
+        }
+        
         // Сортируем по убыванию сходства
         similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
@@ -370,19 +372,36 @@ impl InMemoryVectorStore {
 
         Ok(results)
     }
+
+    /// Геттер для документов (для тестирования)
+    pub fn documents(&self) -> &Vec<Document> {
+        &self.documents
+    }
+
+    /// Геттер для embeddings (для тестирования)
+    pub fn embeddings(&self) -> &Array2<f32> {
+        &self.embeddings
+    }
 }
 
-/// Вычисление косинусного сходства
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+/// Вычисление косинусного сходства для Array1
+pub fn cosine_similarity_arrays(a: &Array1<f32>, b: &Array1<f32>) -> f32 {
+    let dot_product = a.dot(b);
+    let norm_a = a.dot(a).sqrt();
+    let norm_b = b.dot(b).sqrt();
     
     if norm_a == 0.0 || norm_b == 0.0 {
         0.0
     } else {
         dot_product / (norm_a * norm_b)
     }
+}
+
+/// Вычисление косинусного сходства для Vec (для обратной совместимости)
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let array_a = Array1::from(a.to_vec());
+    let array_b = Array1::from(b.to_vec());
+    cosine_similarity_arrays(&array_a, &array_b)
 }
 
 /// Трейт для языковых моделей
@@ -401,7 +420,7 @@ pub struct OllamaLLM {
 impl OllamaLLM {
     pub fn new(model_name: String, ollama_host: Option<String>) -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(300)) // 5 минут на генерацию
+            .timeout(Duration::from_secs(3600)) // 5 минут на генерацию
             .build()
             .expect("Failed to create HTTP client");
 
@@ -435,8 +454,7 @@ impl LanguageModel for OllamaLLM {
             .post(&url)
             .json(&request_body)
             .send()
-            .await
-            .context("Ошибка при запросе к Ollama")?;
+            .await?;
 
         #[derive(Deserialize)]
         struct GenerationResponse {
@@ -445,8 +463,7 @@ impl LanguageModel for OllamaLLM {
 
         let generation_response: GenerationResponse = response
             .json()
-            .await
-            .context("Ошибка при парсинге ответа от Ollama")?;
+            .await?;
 
         Ok(generation_response.response)
     }
@@ -457,7 +474,6 @@ pub struct EnhancedRAGArticleGenerator {
     search_wrapper: Box<dyn SearchWrapper + Send + Sync>,
     document_loader: Box<dyn DocumentLoader + Send + Sync>,
     language_model: Box<dyn LanguageModel + Send + Sync>,
-    embedding_model: Box<dyn EmbeddingModel + Send + Sync>,
     sources_metadata: HashMap<u32, SourceMetadata>,
     source_counter: u32,
 }
@@ -466,19 +482,17 @@ impl EnhancedRAGArticleGenerator {
     pub fn new(
         searx_host: String,
         model_name: String,
-        embedding_model_name: String,
+        _embedding_model_name: String, // Не используется в упрощенной версии
         ollama_host: Option<String>,
     ) -> Self {
         let search_wrapper = Box::new(SearxSearchWrapper::new(searx_host));
         let document_loader = Box::new(RecursiveUrlLoader::new(2, 20));
-        let language_model = Box::new(OllamaLLM::new(model_name, ollama_host.clone()));
-        let embedding_model = Box::new(OllamaEmbeddings::new(embedding_model_name, ollama_host));
+        let language_model = Box::new(OllamaLLM::new(model_name, ollama_host));
 
         Self {
             search_wrapper,
             document_loader,
             language_model,
-            embedding_model,
             sources_metadata: HashMap::new(),
             source_counter: 1,
         }
@@ -583,7 +597,7 @@ impl EnhancedRAGArticleGenerator {
         (summary, topics)
     }
 
-    pub async fn generate_article(&mut self, query: &str, max_retrieved_docs: usize) -> Result<String> {
+    pub async fn generate_article_simple(&mut self, query: &str, max_retrieved_docs: usize) -> Result<String> {
         info!("Начинаем генерацию статьи для запроса: {}", query);
         
         // 1. Поиск URL
@@ -600,23 +614,13 @@ impl EnhancedRAGArticleGenerator {
             return Ok("Не удалось загрузить документы из найденных источников.".to_string());
         }
         
-        // 3. Создание векторного хранилища
-        let embedding_model = Box::new(OllamaEmbeddings::new(
-            "nomic-embed-text:latest".to_string(),
-            Some("http://localhost:11434".to_string()),
-        ));
+        // 3. Простое ранжирование по релевантности без векторного поиска
+        let retrieved_docs = self.simple_text_ranking(&documents, query, max_retrieved_docs);
         
-        let mut vector_store = InMemoryVectorStore::new(embedding_model);
-        vector_store.add_documents(documents).await?;
-        
-        // 4. Поиск релевантных документов
-        info!("Поиск релевантных документов...");
-        let retrieved_docs = vector_store.similarity_search(query, max_retrieved_docs).await?;
-        
-        // 5. Подготовка контекста
+        // 4. Подготовка контекста
         let context_with_sources = self.prepare_context_with_sources(&retrieved_docs);
         
-        // 6. Создание промпта
+        // 5. Создание промпта
         let article_prompt = format!(
             "You are an expert academic writer creating a comprehensive research article based on provided context documents.\n\n\
             AVAILABLE SOURCE DOCUMENTS:\n{}\n\n\
@@ -650,15 +654,63 @@ impl EnhancedRAGArticleGenerator {
             context_with_sources, query
         );
         
-        // 7. Генерация статьи
+        // 6. Генерация статьи
         info!("Генерация статьи с помощью LLM...");
         let article_text = self.language_model.generate(&article_prompt).await?;
         
-        // 8. Добавление списка источников
+        // 7. Добавление списка источников
         let article_with_sources = self.add_enhanced_sources_list(&article_text);
         
         info!("Статья успешно сгенерирована");
         Ok(article_with_sources)
+    }
+
+    /// Простое ранжирование текста по релевантности без векторных вычислений
+    pub fn simple_text_ranking(&self, documents: &[Document], query: &str, max_docs: usize) -> Vec<Document> {
+        // Исправляем проблему с временными значениями
+        let query_lower = query.to_lowercase();
+        let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+        
+        let mut scored_docs: Vec<(Document, f32)> = documents
+            .iter()
+            .map(|doc| {
+                let content_lower = doc.page_content.to_lowercase();
+                let title_lower = doc.metadata.get("source_title")
+                    .unwrap_or(&String::new())
+                    .to_lowercase();
+                
+                let mut score = 0.0;
+                
+                for word in &query_words {
+                    // Подсчет упоминаний в контенте
+                    let content_matches = content_lower.matches(word).count() as f32;
+                    score += content_matches * 1.0;
+                    
+                    // Бонус за упоминание в заголовке
+                    let title_matches = title_lower.matches(word).count() as f32;
+                    score += title_matches * 3.0;
+                }
+                
+                // Нормализуем по длине документа
+                let normalized_score = score / (doc.page_content.len() as f32 + 1.0) * 1000.0;
+                
+                (doc.clone(), normalized_score)
+            })
+            .collect();
+        
+        // Сортируем по убыванию релевантности
+        scored_docs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        
+        scored_docs
+            .into_iter()
+            .take(max_docs)
+            .map(|(doc, _)| doc)
+            .collect()
+    }
+
+    pub async fn generate_article(&mut self, query: &str, max_retrieved_docs: usize) -> Result<String> {
+        // Используем упрощенную версию без векторных вычислений
+        self.generate_article_simple(query, max_retrieved_docs).await
     }
 
     fn prepare_context_with_sources(&self, retrieved_docs: &[Document]) -> String {
@@ -730,13 +782,9 @@ impl EnhancedRAGArticleGenerator {
         
         format!("{}{}", article_text, sources_list)
     }
-}
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Инициализация логирования
-    tracing_subscriber::init();
-    
-    // Запуск CLI
-    run_cli().await
+    /// Геттер для метаданных источников (для тестирования)
+    pub fn sources_metadata(&self) -> &HashMap<u32, SourceMetadata> {
+        &self.sources_metadata
+    }
 }
