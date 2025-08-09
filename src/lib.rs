@@ -13,6 +13,7 @@ use url::Url;
 
 pub mod cli;
 pub mod ollama_utils;
+pub mod parallel_downloader;
 pub mod persistent;
 pub use ollama_utils::*;
 
@@ -605,7 +606,8 @@ impl EnhancedRAGArticleGenerator {
         }
 
         // 2. Загрузка документов
-        let documents = self.load_and_process_documents(urls).await?;
+        // let documents = self.load_and_process_documents(urls).await?;
+        let documents = self.load_and_process_documents_parallel(urls).await?;
 
         if documents.is_empty() {
             return Ok("Не удалось загрузить документы из найденных источников.".to_string());
