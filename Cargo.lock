@@ -483,6 +483,7 @@ dependencies = [
  "anyhow",
  "arroy",
  "async-trait",
+ "byteorder",
  "chrono",
  "clap",
  "futures",

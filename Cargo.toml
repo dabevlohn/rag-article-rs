@@ -36,9 +36,10 @@ nalgebra = "0.32"
 
 # Persistent storage dependencies
 arroy = "0.4"
-heed = "0.20"
+heed = { version = "0.20", features = [] }
 md5 = "0.7"
 chrono = { version = "0.4", features = ["serde"] }
+byteorder = "1.5"
 
 [dev-dependencies]
 tokio-test = "0.4"
