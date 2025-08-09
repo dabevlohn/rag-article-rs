@@ -12,7 +12,9 @@ use tracing::{info, warn};
 use url::Url;
 
 pub mod cli;
+pub mod ollama_utils;
 pub mod persistent;
+pub use ollama_utils::*;
 
 /// Структура для метаданных источника
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -437,19 +439,21 @@ impl LanguageModel for OllamaLLM {
             }
         });
 
-        dbg!(request_body.clone());
+        // dbg!(request_body.clone());
         info!("Отправляем запрос к Ollama для генерации текста");
 
         let response = self.client.post(&url).json(&request_body).send().await?;
 
-        #[derive(Deserialize)]
-        struct GenerationResponse {
-            response: String,
-        }
+        // #[derive(Deserialize)]
+        // struct GenerationResponse {
+        //     response: String,
+        // }
 
-        let generation_response: GenerationResponse = response.json().await?;
+        // let generation_response: GenerationResponse = response.json().await?;
+        let content = parse_ollama_response(&response.text().await?)?;
 
-        Ok(generation_response.response)
+        // Ok(generation_response.response)
+        Ok(content)
     }
 }
 
