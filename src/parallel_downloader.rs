@@ -76,8 +76,7 @@ impl EnhancedRAGArticleGenerator {
         // Создаем HTTP клиент с оптимизированными настройками
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
-            .tcp_keepalive(Duration::from_secs(10))
-            .pool_max_idle_per_host(10)
+            .tcp_keepalive(Some(Duration::from_secs(60)))
             .user_agent("Enhanced-RAG-Generator/2.0")
             .build()?;
 
@@ -101,11 +100,11 @@ impl EnhancedRAGArticleGenerator {
 
                     match self.download_and_process_document(&client, &url).await {
                         Ok(doc) => {
-                            // info!(
-                            //     "✅ Документ {} загружен успешно ({} символов)",
-                            //     index + 1,
-                            //     doc.clone().page_content.len()
-                            // );
+                            info!(
+                                "✅ Документ {} загружен успешно ({} символов)",
+                                index + 1,
+                                doc.page_content.len()
+                            );
                             Ok((doc.clone(), doc.page_content.len()))
                         }
                         Err(e) => {

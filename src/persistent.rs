@@ -369,6 +369,7 @@ pub struct CacheSettings {
     pub enable_personalization: bool,
     pub auto_reindex_interval_hours: u64,
     pub max_vector_cache_size: usize,
+    pub max_concurrent_downloads: usize, // НОВОЕ ПОЛЕ
 }
 
 impl Default for CacheSettings {
@@ -383,6 +384,7 @@ impl Default for CacheSettings {
             enable_personalization: false,
             auto_reindex_interval_hours: 24,
             max_vector_cache_size: 10000,
+            max_concurrent_downloads: 8, // НОВОЕ ЗНАЧЕНИЕ ПО УМОЛЧАНИЮ
         }
     }
 }
@@ -539,9 +541,13 @@ impl PersistentEnhancedRAG {
             fresh_urls.extend(filtered_urls);
         }
 
-        // 4. Загрузка и расширенное кеширование
+        // 4. Загрузка и расширенное кеширование с параллельной загрузкой
         if !fresh_urls.is_empty() {
-            let new_docs = self.inner.load_and_process_documents(fresh_urls.clone()).await?;
+            // ИСПОЛЬЗУЕМ ПАРАЛЛЕЛЬНУЮ ЗАГРУЗКУ
+            let new_docs = self.inner.load_documents_with_concurrency_limit(
+                fresh_urls.clone(), 
+                self.cache_settings.max_concurrent_downloads
+            ).await?;
             
             for doc in &new_docs {
                 self.enhanced_cache_document(doc).await?;
@@ -870,6 +876,11 @@ impl PersistentEnhancedRAG {
             ""
         };
 
+        let parallel_info = format!(
+            "\nPARALLEL PROCESSING: Documents were loaded using {} concurrent streams for optimal performance.\n",
+            self.cache_settings.max_concurrent_downloads
+        );
+
         let quality_info = if cached_docs.len() > 5 {
             format!(
                 "\nSOURCE QUALITY: Using {} high-quality sources selected through AI-powered filtering and ranking.\n",
@@ -880,7 +891,7 @@ impl PersistentEnhancedRAG {
         };
 
         Ok(format!(
-            "You are an expert academic writer with access to AI-enhanced research capabilities.{}{}\
+            "You are an expert academic writer with access to AI-enhanced research capabilities.{}{}{}\
             \nAVAILABLE SOURCE DOCUMENTS:\n{}\n\n\
             TASK: Write a comprehensive, well-structured article about: {}\n\n\
             AI-ENHANCED REQUIREMENTS:\n\
@@ -912,7 +923,7 @@ impl PersistentEnhancedRAG {
             - Discuss advantages, limitations, alternatives with nuanced analysis\n\
             - Provide actionable insights and expert recommendations\n\n\
             Begin writing the AI-enhanced comprehensive article:",
-            semantic_info, quality_info, context, query
+            semantic_info, parallel_info, quality_info, context, query
         ))
     }
 

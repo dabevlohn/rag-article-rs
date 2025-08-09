@@ -1,4 +1,4 @@
-use crate::ollama_utils::{parse_ollama_response, validate_environment};
+use crate::ollama_utils::validate_environment;
 use crate::persistent::*;
 use anyhow::Result;
 use clap::{Arg, Command};
@@ -133,6 +133,13 @@ pub fn cli() -> Command {
                 .help("Автоматически установить модель если её нет")
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("concurrent-downloads")
+                .long("concurrent-downloads")
+                .help("Максимальное количество одновременных загрузок")
+                .default_value("8")
+                .value_parser(clap::value_parser!(usize)),
+        )
 }
 
 pub async fn run_cli() -> Result<()> {
@@ -161,6 +168,7 @@ pub async fn run_cli() -> Result<()> {
     let cleanup_cache = matches.get_flag("cleanup-cache");
     let validate_env = matches.get_flag("validate-env");
     let auto_install = matches.get_flag("auto-install");
+    let concurrent_downloads = *matches.get_one::<usize>("concurrent-downloads").unwrap();
     let expertise_level = matches.get_one::<String>("expertise-level").unwrap();
 
     info!("🚀 Enhanced RAG Article Generator v2.0 - AI-Powered Edition");
@@ -171,6 +179,10 @@ pub async fn run_cli() -> Result<()> {
     info!("  🧠 LLM модель: {}", model);
     info!("  🎯 Embedding модель: {}", embedding_model);
     info!("  📊 Макс документов: {}", max_docs);
+    info!(
+        "  🔄 Параллельная загрузка: {} потоков",
+        concurrent_downloads
+    );
     info!("  💾 Выходной файл: {}", output);
 
     if let Some(db_path) = database_path {
@@ -245,6 +257,7 @@ pub async fn run_cli() -> Result<()> {
         enable_personalization,
         auto_reindex_interval_hours: 24,
         max_vector_cache_size: 10000,
+        max_concurrent_downloads: concurrent_downloads, // НОВОЕ ПОЛЕ
     };
 
     // Пользовательский контекст для персонализации
@@ -433,6 +446,7 @@ pub async fn run_cli() -> Result<()> {
             error!("  🌐 SearXNG доступен: {}", searx_host);
             error!("  🤖 Ollama доступен: {}", ollama_host);
             error!("  🧠 Модель: {}", model);
+            error!("  🔄 Параллельные потоки: {}", concurrent_downloads);
 
             if let Some(db_path) = database_path {
                 error!("  🗄️ Путь к БД: {:?}", db_path);
@@ -450,6 +464,7 @@ pub async fn run_cli() -> Result<()> {
             }
             error!("  • Запустите с --validate-env для диагностики");
             error!("  • Запустите с --auto-install для автоустановки");
+            error!("  • Уменьшите количество потоков: --concurrent-downloads 4");
 
             Err(e)
         }
